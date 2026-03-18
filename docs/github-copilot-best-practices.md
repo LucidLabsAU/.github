@@ -11,7 +11,8 @@
 5. [CI/CD Quality Gates](#cicd-quality-gates)
 6. [Dependency Management](#dependency-management)
 7. [Security](#security)
-8. [Claude Code](#claude-code)
+8. [Agentic Workflows](#agentic-workflows)
+9. [Claude Code](#claude-code)
 
 ---
 
@@ -384,6 +385,115 @@ For web projects, maintain strict CSP in deployment config:
 
 ---
 
+## Agentic Workflows
+
+> **Status: Private preview** — prepare files now, activate when preview access is granted.
+
+GitHub Agentic Workflows are Markdown-based automation files that run coding agents in GitHub Actions. They enable "Continuous AI" — automated, intent-driven workflows triggered by repository events.
+
+### Directory Structure
+
+```
+.github/
+├── agents/                           # Specialist agent definitions
+│   └── <role>.agent.md
+├── prompts/                          # Reusable task prompts
+│   └── <task>.prompt.md
+└── agentic-workflows/                # AI-automated workflows
+    └── <workflow>.md
+```
+
+### Agent Definitions (`.github/agents/*.agent.md`)
+
+Define specialist personas with YAML frontmatter:
+
+```markdown
+---
+name: API-Developer
+description: Expert agent for type-safe API endpoints
+---
+
+# API Developer Agent
+
+<Role description, responsibilities, patterns, quality standards>
+```
+
+Invoke in Copilot Chat: `@workspace /agents/<name>`
+
+### Prompt Templates (`.github/prompts/*.prompt.md`)
+
+Reusable task prompts for common operations:
+
+```markdown
+# Add Feature
+
+## Steps
+1. Define types and schemas
+2. Implement data layer
+3. Create API endpoints
+4. Build UI components
+5. Write tests
+
+## Validation
+- [ ] Type check passes
+- [ ] Tests pass
+- [ ] Build succeeds
+```
+
+Invoke in Copilot Chat: `@workspace /prompts/<name>`
+
+### Agentic Workflow Format
+
+```markdown
+---
+name: Workflow Name
+description: What this workflow does
+triggers:
+  - type: issues
+    activity: opened
+    label: bug
+permissions:
+  contents: read
+  issues: write
+safe-outputs:
+  - comment-on-issue
+  - create-pull-request
+---
+
+# Natural Language Instructions
+
+<What the agent should do when triggered>
+```
+
+**Key concepts:**
+- **Triggers** — repository events (`issues`, `pull_request`, `check_run`, `schedule`)
+- **Safe outputs** — explicitly declared allowed actions (`create-pull-request`, `comment-on-issue`, `add-label`)
+- **Permissions** — read-only by default, minimum required scope
+- **Compilation** — `gh aw compile` generates `.lock.yml` files for execution
+
+### Common Automation Patterns
+
+| Pattern | Trigger | Safe Outputs |
+|---------|---------|-------------|
+| Issue triage | `issues.opened` | `add-label`, `comment-on-issue` |
+| Docs sync | `pull_request.closed` (merged) | `create-pull-request` |
+| CI failure analysis | `check_run.completed` (failure) | `comment-on-pull-request` |
+| Weekly audit | `schedule` (cron) | `create-pull-request`, `comment-on-issue` |
+
+### Security
+
+- **Read-only default** — workflows can only read repository contents
+- **Safe outputs** — explicitly whitelist allowed write actions
+- **No secrets** — agents don't have access to repository secrets
+- **Sandboxed** — execution is isolated in GitHub Actions
+- **Human review** — PRs created by agents require human approval
+
+### Claude Code Skill
+
+Use the `github-agentic-workflows` Claude Code skill to scaffold agent definitions, prompt templates, and agentic workflow files for any repository.
+
+---
+
 ## Claude Code
 
 ### CLAUDE.md
@@ -410,6 +520,8 @@ When setting up a new repo or bringing an existing one to standard:
 - [ ] `.github/copilot-instructions.md` — project instructions
 - [ ] `.github/instructions/` — path-specific instructions (optional)
 - [ ] `.github/prompts/` — reusable prompts (optional)
+- [ ] `.github/agents/` — specialist agent definitions (optional)
+- [ ] `.github/agentic-workflows/` — AI automation files (optional, preview)
 - [ ] `.github/workflows/copilot-setup-steps.yml` — Copilot coding agent environment
 - [ ] `.github/dependabot.yml` — dependency management
 - [ ] `CLAUDE.md` — Claude Code instructions
