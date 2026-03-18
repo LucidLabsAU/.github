@@ -1,0 +1,6 @@
+{
+  "name": "Copilot Setup Steps (Node.js)",
+  "description": "Pre-seeds the Copilot coding agent environment with Node.js and npm dependencies",
+  "iconName": "copilot",
+  "categories": ["Automation", "AI"]
+}

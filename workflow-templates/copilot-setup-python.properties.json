@@ -1,0 +1,6 @@
+{
+  "name": "Copilot Setup Steps (Python/uv)",
+  "description": "Pre-seeds the Copilot coding agent environment with Python and uv dependencies",
+  "iconName": "copilot",
+  "categories": ["Automation", "AI"]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Copilot Setup Steps (.NET)",
+  "description": "Pre-seeds the Copilot coding agent environment with .NET SDK and NuGet packages",
+  "iconName": "copilot",
+  "categories": ["Automation", "AI"]
+}
