@@ -1,0 +1,6 @@
+{
+  "name": "Copilot Setup Steps (PowerShell)",
+  "description": "Pre-seeds the Copilot coding agent environment with PowerShell modules for analysis and testing",
+  "iconName": "copilot",
+  "categories": ["Automation", "AI"]
+}
