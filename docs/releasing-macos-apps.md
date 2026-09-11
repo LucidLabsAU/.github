@@ -133,10 +133,14 @@ az keyvault network-rule add --name "$VAULT" --ip-address "$MYIP/32" -o none
     done
   done
 ) } always {
-  az keyvault network-rule remove --name "$VAULT" --ip-address "$MYIP/32" -o none
+  az keyvault network-rule remove --name "$VAULT" --ip-address "$MYIP/32" -o none \
+    || print -u2 "✗ could not remove $MYIP/32 from $VAULT: remove it by hand now"
   unset P12PW
 }
-az keyvault network-rule list --name "$VAULT" --query ipRules -o tsv   # expect nothing
+rules=$(az keyvault network-rule list --name "$VAULT" --query "ipRules[].value" -o tsv) \
+  && [[ $rules != *"$MYIP"* ]] \
+  && print "✓ vault closed to $MYIP" \
+  || print -u2 "✗ can't confirm $MYIP was removed from $VAULT: check its network rules now"
 ```
 
 If a step fails, the block stops there, the vault still closes, and zsh
