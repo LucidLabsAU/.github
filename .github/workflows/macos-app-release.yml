@@ -128,6 +128,7 @@ jobs:
             || { echo "::error::CFBundleExecutable in $INFO_PLIST is not $EXECUTABLE"; exit 1; }
 
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            [[ "$GITHUB_REF_NAME" == v* ]] || { echo "::error::Tag $GITHUB_REF_NAME must start with v (v1.2.3)"; exit 1; }
             version="${GITHUB_REF_NAME#v}"
           elif [[ "$DRY_RUN" == true ]]; then
             version="$(plist_get CFBundleShortVersionString)"
@@ -139,11 +140,11 @@ jobs:
           fi
 
           if [[ "$HAS_APP_CERT" == true ]]; then
-            missing=()
-            [[ "$HAS_P12_PASSWORD" == true ]] || missing+=(P12_PASSWORD)
-            [[ "$HAS_NOTARY_KEY" == true ]] || missing+=(ASC_KEY_ID/ASC_ISSUER_ID/ASC_KEY_P8_BASE64)
-            if (( ${#missing[@]} )); then
-              echo "::error::Developer ID certificate present but missing: ${missing[*]}"; exit 1
+            missing=""
+            [[ "$HAS_P12_PASSWORD" == true ]] || missing+=" P12_PASSWORD"
+            [[ "$HAS_NOTARY_KEY" == true ]] || missing+=" ASC_KEY_ID/ASC_ISSUER_ID/ASC_KEY_P8_BASE64"
+            if [[ -n "$missing" ]]; then
+              echo "::error::Developer ID certificate present but missing:$missing"; exit 1
             fi
           fi
 
@@ -217,7 +218,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$KEYCHAIN" > /dev/null
           existing=()
           while IFS= read -r kc; do existing+=("$kc"); done < <(security list-keychains -d user | tr -d '"' | sed 's/^ *//')
-          security list-keychains -d user -s "$KEYCHAIN" "${existing[@]}"
+          security list-keychains -d user -s "$KEYCHAIN" ${existing[@]+"${existing[@]}"}
 
           app_identity="$(security find-identity -v -p codesigning "$KEYCHAIN" \
             | awk '/"Developer ID Application: / { print $2; exit }')"
@@ -308,7 +309,8 @@ jobs:
           else
             echo "::warning title=Unsigned pkg::$STEM.pkg is not signed (no DEVELOPER_ID_INSTALLER_P12_BASE64). Intune line-of-business deployment needs a Developer ID Installer signature."
           fi
-          productbuild --package "$component_pkg" "${sign[@]}" "$DIST/$STEM.pkg"
+          # ${a[@]+...}: macOS /bin/bash is 3.2, where an empty array trips `set -u`.
+          productbuild --package "$component_pkg" ${sign[@]+"${sign[@]}"} "$DIST/$STEM.pkg"
           pkgutil --check-signature "$DIST/$STEM.pkg" || true
 
       - name: Notarise and staple the pkg
