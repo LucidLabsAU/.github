@@ -102,7 +102,7 @@ them to both repos' `release` environments, and closes the vault again, even
 if a step fails.
 
 ```zsh
-VAULT=<vault-name>                 # the Lucid platform Key Vault
+VAULT="<vault-name>"               # replace with the Lucid platform Key Vault name
 REPOS=(LucidLabsAU/sitrep LucidLabsAU/timer)
 MYIP=$(curl -fsS https://api.ipify.org)
 read -rs 'P12PW?.p12 export password: '; echo
@@ -110,7 +110,8 @@ read -r 'KEYID?ASC key ID: '
 read -r 'ISSUER?ASC issuer ID: '
 
 az keyvault network-rule add --name "$VAULT" --ip-address "$MYIP/32" -o none
-{
+{ (
+  setopt err_exit pipe_fail   # stop at the first failure; the always block still closes the vault
   az keyvault secret set --vault-name "$VAULT" -o none --name apple-developer-id-app-p12       --file DeveloperIDApplication.p12 --encoding base64
   az keyvault secret set --vault-name "$VAULT" -o none --name apple-developer-id-installer-p12 --file DeveloperIDInstaller.p12  --encoding base64
   az keyvault secret set --vault-name "$VAULT" -o none --name apple-asc-key-p8                --file AuthKey_"$KEYID".p8      --encoding base64
@@ -131,12 +132,20 @@ az keyvault network-rule add --name "$VAULT" --ip-address "$MYIP/32" -o none
         | tr -d '\n' | gh secret set "${pair%%:*}" --env release --repo "$repo"
     done
   done
-} always {
-  az keyvault network-rule remove --name "$VAULT" --ip-address "$MYIP/32" -o none
+) } always {
+  az keyvault network-rule remove --name "$VAULT" --ip-address "$MYIP/32" -o none \
+    || print -u2 "✗ could not remove $MYIP/32 from $VAULT: remove it by hand now"
   unset P12PW
 }
-az keyvault network-rule list --name "$VAULT" --query ipRules -o tsv   # expect nothing
+rules=$(az keyvault network-rule list --name "$VAULT" --query "ipRules[].value" -o tsv) \
+  && [[ $rules != *"$MYIP"* ]] \
+  && print "✓ vault closed to $MYIP" \
+  || print -u2 "✗ can't confirm $MYIP was removed from $VAULT: check its network rules now"
 ```
+
+If a step fails, the block stops there, the vault still closes, and zsh
+reports the failing command. Every command can safely run twice, so fix the
+cause and run the block again.
 
 Then keep the `.p12` files and `.p8` out of Downloads and cloud-synced folders,
 or delete them; Key Vault is the copy of record. To onboard another app repo
@@ -184,7 +193,9 @@ Verify a download:
 shasum -a 256 -c SHA256SUMS.txt
 spctl --assess --type execute --verbose=2 Sitrep.app    # source=Notarized Developer ID
 xcrun stapler validate Sitrep.app
-pkgutil --check-signature Sitrep-1.0.0.pkg              # Developer ID Installer, notarised
+pkgutil --check-signature Sitrep-1.0.0.pkg              # Developer ID Installer signature
+xcrun stapler validate Sitrep-1.0.0.pkg                 # notarisation ticket stapled
+spctl --assess --type install --verbose=2 Sitrep-1.0.0.pkg   # source=Notarized Developer ID
 lipo -archs Sitrep.app/Contents/MacOS/Sitrep            # x86_64 arm64
 ```
 
