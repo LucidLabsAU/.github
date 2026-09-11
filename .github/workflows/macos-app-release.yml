@@ -1,0 +1,393 @@
+# Reusable release pipeline for SwiftPM macOS apps (menu bar utilities etc.).
+#
+# Builds a universal .app, then a zip and an /Applications installer .pkg,
+# with SHA-256 checksums. Publishes a GitHub Release, or an Actions artefact
+# when dry-run is true.
+#
+# Signing is opportunistic. With the Developer ID secrets present, the app is
+# signed (hardened runtime), notarised and stapled, and the .pkg is signed
+# with the Installer identity. Without them the build is ad-hoc signed and the
+# run emits a warning.
+#
+# This repo is public. The file holds no secrets or tenant data; callers pass
+# secrets, normally from a protected `release` environment.
+# Runbook: docs/releasing-macos-apps.md
+
+name: macOS app release
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: Bundle and artefact name, e.g. Sitrep (produces Sitrep.app)
+        required: true
+        type: string
+      executable:
+        description: SwiftPM executable product; must match CFBundleExecutable
+        required: true
+        type: string
+      bundle-id:
+        description: Must match CFBundleIdentifier in the Info.plist
+        required: true
+        type: string
+      entitlements:
+        description: Entitlements plist to sign with, e.g. Support/App.entitlements
+        required: false
+        type: string
+        default: ''
+      info-plist:
+        description: Info.plist to bundle
+        required: false
+        type: string
+        default: Support/Info.plist
+      icon:
+        description: .icns to bundle as Contents/Resources (skipped if absent)
+        required: false
+        type: string
+        default: Support/AppIcon.icns
+      environment:
+        description: Deployment environment that holds the signing secrets
+        required: false
+        type: string
+        default: release
+      dry-run:
+        description: Upload an Actions artefact instead of creating a GitHub Release
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      DEVELOPER_ID_APP_P12_BASE64:
+        description: Base64 .p12 holding the Developer ID Application identity
+        required: false
+      DEVELOPER_ID_INSTALLER_P12_BASE64:
+        description: Base64 .p12 holding the Developer ID Installer identity
+        required: false
+      P12_PASSWORD:
+        description: Export password for both .p12 files
+        required: false
+      ASC_KEY_ID:
+        description: App Store Connect API key ID (notarisation)
+        required: false
+      ASC_ISSUER_ID:
+        description: App Store Connect API issuer ID (notarisation)
+        required: false
+      ASC_KEY_P8_BASE64:
+        description: Base64 App Store Connect API private key (.p8)
+        required: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: Build, sign, package
+    runs-on: macos-15
+    timeout-minutes: 60
+    # Environment secrets are only reachable when the reusable workflow's own
+    # job declares the environment; a calling job cannot set `environment`.
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write
+    env:
+      APP_NAME: ${{ inputs.app-name }}
+      EXECUTABLE: ${{ inputs.executable }}
+      BUNDLE_ID: ${{ inputs.bundle-id }}
+      ENTITLEMENTS: ${{ inputs.entitlements }}
+      INFO_PLIST: ${{ inputs.info-plist }}
+      ICON: ${{ inputs.icon }}
+      DRY_RUN: ${{ inputs.dry-run }}
+      HAS_APP_CERT: ${{ secrets.DEVELOPER_ID_APP_P12_BASE64 != '' }}
+      DIST: dist
+    steps:
+      - name: Check out
+        # SHA-pinned: actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Resolve version and check inputs
+        id: meta
+        env:
+          HAS_P12_PASSWORD: ${{ secrets.P12_PASSWORD != '' }}
+          HAS_NOTARY_KEY: ${{ secrets.ASC_KEY_ID != '' && secrets.ASC_ISSUER_ID != '' && secrets.ASC_KEY_P8_BASE64 != '' }}
+        run: |
+          set -euo pipefail
+          plist_get() { /usr/libexec/PlistBuddy -c "Print :$1" "$INFO_PLIST"; }
+
+          test -f "$INFO_PLIST" || { echo "::error::Info.plist not found: $INFO_PLIST"; exit 1; }
+          if [[ -n "$ENTITLEMENTS" && ! -f "$ENTITLEMENTS" ]]; then
+            echo "::error::Entitlements not found: $ENTITLEMENTS"; exit 1
+          fi
+          [[ "$(plist_get CFBundleIdentifier)" == "$BUNDLE_ID" ]] \
+            || { echo "::error::CFBundleIdentifier in $INFO_PLIST is not $BUNDLE_ID"; exit 1; }
+          [[ "$(plist_get CFBundleExecutable)" == "$EXECUTABLE" ]] \
+            || { echo "::error::CFBundleExecutable in $INFO_PLIST is not $EXECUTABLE"; exit 1; }
+
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          elif [[ "$DRY_RUN" == true ]]; then
+            version="$(plist_get CFBundleShortVersionString)"
+          else
+            echo "::error::Releases are cut from v* tags. Run from a tag or set dry-run."; exit 1
+          fi
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "::error::Version '$version' is not numeric (1.2.3); Apple and Intune reject it."; exit 1
+          fi
+
+          if [[ "$HAS_APP_CERT" == true ]]; then
+            missing=()
+            [[ "$HAS_P12_PASSWORD" == true ]] || missing+=(P12_PASSWORD)
+            [[ "$HAS_NOTARY_KEY" == true ]] || missing+=(ASC_KEY_ID/ASC_ISSUER_ID/ASC_KEY_P8_BASE64)
+            if (( ${#missing[@]} )); then
+              echo "::error::Developer ID certificate present but missing: ${missing[*]}"; exit 1
+            fi
+          fi
+
+          {
+            echo "version=$version"
+            echo "build=$GITHUB_RUN_NUMBER"
+            echo "stem=$APP_NAME-$version"
+          } >> "$GITHUB_OUTPUT"
+          echo "KEYCHAIN=$RUNNER_TEMP/release-signing.keychain-db" >> "$GITHUB_ENV"
+          echo "Version $version (build $GITHUB_RUN_NUMBER), dry-run=$DRY_RUN, signed=$HAS_APP_CERT"
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Unit tests
+        run: swift test
+
+      - name: Universal release build
+        run: |
+          set -euo pipefail
+          swift build -c release --arch arm64 --arch x86_64
+          bin=".build/apple/Products/Release/$EXECUTABLE"
+          test -x "$bin" || { echo "::error::Universal binary not found at $bin"; exit 1; }
+          archs="$(lipo -archs "$bin")"
+          echo "Architectures: $archs"
+          [[ " $archs " == *" arm64 "* && " $archs " == *" x86_64 "* ]] \
+            || { echo "::error::Expected arm64 and x86_64, got: $archs"; exit 1; }
+
+      - name: Assemble and stamp the .app
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILD: ${{ steps.meta.outputs.build }}
+        run: |
+          set -euo pipefail
+          app="$DIST/$APP_NAME.app"
+          rm -rf "$DIST"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp ".build/apple/Products/Release/$EXECUTABLE" "$app/Contents/MacOS/$EXECUTABLE"
+          cp "$INFO_PLIST" "$app/Contents/Info.plist"
+          if [[ -f "$ICON" ]]; then cp "$ICON" "$app/Contents/Resources/"; fi
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+
+      - name: Import Developer ID certificates
+        if: env.HAS_APP_CERT == 'true'
+        env:
+          APP_P12: ${{ secrets.DEVELOPER_ID_APP_P12_BASE64 }}
+          INSTALLER_P12: ${{ secrets.DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$keychain_password" "$KEYCHAIN"
+
+          import_p12() {
+            local p12="$RUNNER_TEMP/import.p12"
+            printf '%s' "$1" | base64 --decode > "$p12"
+            security import "$p12" -k "$KEYCHAIN" -f pkcs12 -P "$P12_PASSWORD" \
+              -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/pkgbuild -T /usr/bin/productsign
+            rm -f "$p12"
+          }
+          import_p12 "$APP_P12"
+          if [[ -n "$INSTALLER_P12" ]]; then import_p12 "$INSTALLER_P12"; fi
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$KEYCHAIN" > /dev/null
+          existing=()
+          while IFS= read -r kc; do existing+=("$kc"); done < <(security list-keychains -d user | tr -d '"' | sed 's/^ *//')
+          security list-keychains -d user -s "$KEYCHAIN" "${existing[@]}"
+
+          app_identity="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk '/"Developer ID Application: / { print $2; exit }')"
+          [[ -n "$app_identity" ]] || { echo "::error::No Developer ID Application identity in the .p12"; exit 1; }
+          echo "APP_IDENTITY=$app_identity" >> "$GITHUB_ENV"
+
+          if [[ -n "$INSTALLER_P12" ]]; then
+            installer_identity="$(security find-identity -v -p basic "$KEYCHAIN" \
+              | sed -n 's/.*"\(Developer ID Installer: [^"]*\)".*/\1/p' | head -1)"
+            [[ -n "$installer_identity" ]] || { echo "::error::No Developer ID Installer identity in the .p12"; exit 1; }
+            echo "INSTALLER_IDENTITY=$installer_identity" >> "$GITHUB_ENV"
+          fi
+          security find-identity -v "$KEYCHAIN" | sed '$d'
+
+      - name: Sign with Developer ID
+        if: env.HAS_APP_CERT == 'true'
+        run: |
+          set -euo pipefail
+          args=(--force --options runtime --timestamp --keychain "$KEYCHAIN" --sign "$APP_IDENTITY")
+          if [[ -n "$ENTITLEMENTS" ]]; then args+=(--entitlements "$ENTITLEMENTS"); fi
+          codesign "${args[@]}" "$DIST/$APP_NAME.app"
+
+      - name: Ad-hoc sign (no Developer ID certificate)
+        if: env.HAS_APP_CERT != 'true'
+        run: |
+          set -euo pipefail
+          args=(--force --options runtime --sign -)
+          if [[ -n "$ENTITLEMENTS" ]]; then args+=(--entitlements "$ENTITLEMENTS"); fi
+          codesign "${args[@]}" "$DIST/$APP_NAME.app"
+          echo "::warning title=Unsigned build::$APP_NAME is ad-hoc signed and not notarised (no DEVELOPER_ID_APP_P12_BASE64). Gatekeeper will block it on other Macs and Intune will not accept the .pkg."
+
+      - name: Verify signature
+        run: |
+          set -euo pipefail
+          codesign --verify --strict --verbose=2 "$DIST/$APP_NAME.app"
+          codesign -dvv "$DIST/$APP_NAME.app" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp|Runtime Version|CodeDirectory)'
+
+      - name: Notarise and staple the .app
+        if: env.HAS_APP_CERT == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$ASC_KEY_P8" | base64 --decode > "$key"
+          chmod 600 "$key"
+          echo "NOTARY_KEY=$key" >> "$GITHUB_ENV"
+
+          submission="$RUNNER_TEMP/$APP_NAME-notarise.zip"
+          ditto -c -k --keepParent "$DIST/$APP_NAME.app" "$submission"
+          result="$(xcrun notarytool submit "$submission" --key "$key" --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" --wait --timeout 30m --output-format json)"
+          echo "$result"
+          if [[ "$(jq -r .status <<< "$result")" != Accepted ]]; then
+            xcrun notarytool log "$(jq -r .id <<< "$result")" --key "$key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" || true
+            echo "::error::Notarisation of $APP_NAME.app was not accepted"; exit 1
+          fi
+          xcrun stapler staple "$DIST/$APP_NAME.app"
+          xcrun stapler validate "$DIST/$APP_NAME.app"
+          spctl --assess --type execute --verbose=2 "$DIST/$APP_NAME.app"
+
+      - name: Build zip and installer pkg
+        env:
+          STEM: ${{ steps.meta.outputs.stem }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent "$DIST/$APP_NAME.app" "$DIST/$STEM.zip"
+
+          # Stage the payload so the component plist can pin the install
+          # location: a relocatable bundle would be "upgraded" in place wherever
+          # Installer finds another copy with the same bundle ID.
+          root="$RUNNER_TEMP/pkgroot"
+          component_plist="$RUNNER_TEMP/component.plist"
+          component_pkg="$RUNNER_TEMP/component.pkg"
+          rm -rf "$root"; mkdir -p "$root"
+          ditto "$DIST/$APP_NAME.app" "$root/$APP_NAME.app"
+          pkgbuild --analyze --root "$root" "$component_plist"
+          /usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' "$component_plist"
+          pkgbuild --root "$root" --component-plist "$component_plist" --identifier "$BUNDLE_ID" \
+            --version "$VERSION" --install-location /Applications "$component_pkg"
+
+          sign=()
+          if [[ -n "${INSTALLER_IDENTITY:-}" ]]; then
+            sign=(--sign "$INSTALLER_IDENTITY" --keychain "$KEYCHAIN" --timestamp)
+          else
+            echo "::warning title=Unsigned pkg::$STEM.pkg is not signed (no DEVELOPER_ID_INSTALLER_P12_BASE64). Intune line-of-business deployment needs a Developer ID Installer signature."
+          fi
+          productbuild --package "$component_pkg" "${sign[@]}" "$DIST/$STEM.pkg"
+          pkgutil --check-signature "$DIST/$STEM.pkg" || true
+
+      - name: Notarise and staple the pkg
+        if: env.INSTALLER_IDENTITY != ''
+        env:
+          STEM: ${{ steps.meta.outputs.stem }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          result="$(xcrun notarytool submit "$DIST/$STEM.pkg" --key "$NOTARY_KEY" --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" --wait --timeout 30m --output-format json)"
+          echo "$result"
+          if [[ "$(jq -r .status <<< "$result")" != Accepted ]]; then
+            xcrun notarytool log "$(jq -r .id <<< "$result")" --key "$NOTARY_KEY" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" || true
+            echo "::error::Notarisation of $STEM.pkg was not accepted"; exit 1
+          fi
+          xcrun stapler staple "$DIST/$STEM.pkg"
+          spctl --assess --type install --verbose=2 "$DIST/$STEM.pkg"
+
+      - name: Checksums and summary
+        env:
+          STEM: ${{ steps.meta.outputs.stem }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILD: ${{ steps.meta.outputs.build }}
+        run: |
+          set -euo pipefail
+          (cd "$DIST" && shasum -a 256 "$STEM.zip" "$STEM.pkg" > SHA256SUMS.txt)
+          signed="ad-hoc (unsigned)"
+          [[ "$HAS_APP_CERT" == true ]] && signed="Developer ID, notarised and stapled"
+          pkg_signed="unsigned"
+          [[ -n "${INSTALLER_IDENTITY:-}" ]] && pkg_signed="Developer ID Installer, notarised"
+          {
+            echo "## $APP_NAME $VERSION (build $BUILD)"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Bundle ID | \`$BUNDLE_ID\` |"
+            echo "| App signature | $signed |"
+            echo "| Installer | $pkg_signed |"
+            echo "| Published as | $([[ "$DRY_RUN" == true ]] && echo 'Actions artefact (dry run)' || echo 'GitHub Release') |"
+            echo
+            echo '```'
+            cat "$DIST/SHA256SUMS.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$DIST/SHA256SUMS.txt"
+
+      - name: Upload artefact (dry run)
+        if: inputs.dry-run
+        # SHA-pinned: actions/upload-artifact v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.meta.outputs.stem }}-build${{ steps.meta.outputs.build }}
+          path: |
+            dist/${{ steps.meta.outputs.stem }}.zip
+            dist/${{ steps.meta.outputs.stem }}.pkg
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STEM: ${{ steps.meta.outputs.stem }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          notes=""
+          if [[ "$HAS_APP_CERT" != true ]]; then
+            notes="**Unsigned build.** Ad-hoc signed and not notarised: right-click → Open on first launch. Not deployable through Intune."
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$APP_NAME $VERSION" --notes "$notes" --generate-notes \
+            "$DIST/$STEM.zip" "$DIST/$STEM.pkg" "$DIST/SHA256SUMS.txt"
+
+      - name: Remove signing material
+        if: always()
+        run: |
+          if [[ -n "${KEYCHAIN:-}" && -f "$KEYCHAIN" ]]; then security delete-keychain "$KEYCHAIN"; fi
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/import.p12"
