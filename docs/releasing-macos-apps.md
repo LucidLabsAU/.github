@@ -11,7 +11,7 @@ reusable workflow in this repo,
 [`macos-app-release.yml`](../.github/workflows/macos-app-release.yml):
 
 1. `swift test`
-2. universal build (`swift build -c release --arch arm64 --arch x86_64`)
+2. arm64 build (`swift build -c release --arch arm64`)
 3. assemble `<App>.app`, stamping `CFBundleShortVersionString` from the tag
    (`v1.2.3` → `1.2.3`) and `CFBundleVersion` from the run number
 4. sign with hardened runtime, notarise and staple, if the Developer ID secrets
@@ -166,7 +166,7 @@ xcrun notarytool store-credentials notary \
 Each app's `Makefile` mirrors the pipeline:
 
 ```bash
-make release                       # universal, hardened runtime; ad-hoc (SIGN_ID=-) by default
+make release                       # arm64, hardened runtime; ad-hoc (SIGN_ID=-) by default
 make pkg INSTALLER_ID="Developer ID Installer: Lucid Labs Pty Ltd (N3DE89M9C7)"
 make notarize NOTARY_PROFILE=notary \
   SIGN_ID="Developer ID Application: Lucid Labs Pty Ltd (N3DE89M9C7)" \
@@ -196,7 +196,7 @@ xcrun stapler validate Sitrep.app
 pkgutil --check-signature Sitrep-1.0.0.pkg              # Developer ID Installer signature
 xcrun stapler validate Sitrep-1.0.0.pkg                 # notarisation ticket stapled
 spctl --assess --type install --verbose=2 Sitrep-1.0.0.pkg   # source=Notarized Developer ID
-lipo -archs Sitrep.app/Contents/MacOS/Sitrep            # x86_64 arm64
+lipo -archs Sitrep.app/Contents/MacOS/Sitrep            # arm64
 ```
 
 ## Intune delivery (macOS line-of-business)

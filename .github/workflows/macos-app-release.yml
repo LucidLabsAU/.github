@@ -1,6 +1,6 @@
 # Reusable release pipeline for SwiftPM macOS apps (menu bar utilities etc.).
 #
-# Builds a universal .app, then a zip and an /Applications installer .pkg,
+# Builds an Apple silicon (arm64) .app, then a zip and an /Applications installer .pkg,
 # with SHA-256 checksums. Publishes a GitHub Release, or an Actions artefact
 # when dry-run is true.
 #
@@ -164,16 +164,15 @@ jobs:
       - name: Unit tests
         run: swift test
 
-      - name: Universal release build
+      - name: Release build (arm64)
         run: |
           set -euo pipefail
-          swift build -c release --arch arm64 --arch x86_64
-          bin=".build/apple/Products/Release/$EXECUTABLE"
-          test -x "$bin" || { echo "::error::Universal binary not found at $bin"; exit 1; }
+          swift build -c release --arch arm64
+          bin=".build/arm64-apple-macosx/release/$EXECUTABLE"
+          test -x "$bin" || { echo "::error::Release binary not found at $bin"; exit 1; }
           archs="$(lipo -archs "$bin")"
           echo "Architectures: $archs"
-          [[ " $archs " == *" arm64 "* && " $archs " == *" x86_64 "* ]] \
-            || { echo "::error::Expected arm64 and x86_64, got: $archs"; exit 1; }
+          [[ "$archs" == "arm64" ]] || { echo "::error::Expected arm64 only, got: $archs"; exit 1; }
 
       - name: Assemble and stamp the .app
         env:
@@ -184,7 +183,7 @@ jobs:
           app="$DIST/$APP_NAME.app"
           rm -rf "$DIST"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp ".build/apple/Products/Release/$EXECUTABLE" "$app/Contents/MacOS/$EXECUTABLE"
+          cp ".build/arm64-apple-macosx/release/$EXECUTABLE" "$app/Contents/MacOS/$EXECUTABLE"
           cp "$INFO_PLIST" "$app/Contents/Info.plist"
           if [[ -f "$ICON" ]]; then cp "$ICON" "$app/Contents/Resources/"; fi
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$app/Contents/Info.plist"
@@ -310,7 +309,14 @@ jobs:
             echo "::warning title=Unsigned pkg::$STEM.pkg is not signed (no DEVELOPER_ID_INSTALLER_P12_BASE64). Intune line-of-business deployment needs a Developer ID Installer signature."
           fi
           # ${a[@]+...}: macOS /bin/bash is 3.2, where an empty array trips `set -u`.
-          productbuild --package "$component_pkg" ${sign[@]+"${sign[@]}"} "$DIST/$STEM.pkg"
+          # A synthesised Distribution has no <title> (Installer shows a blank name) and
+          # claims x86_64 regardless of the binary, so pin both before building from it.
+          dist_xml="$RUNNER_TEMP/distribution.xml"
+          productbuild --synthesize --package "$component_pkg" "$dist_xml"
+          sed -i '' -e "s|<installer-gui-script minSpecVersion=\"1\">|&<title>$APP_NAME</title>|" \
+            -e 's|hostArchitectures="[^"]*"|hostArchitectures="arm64"|' "$dist_xml"
+          productbuild --distribution "$dist_xml" --package-path "$RUNNER_TEMP" \
+            ${sign[@]+"${sign[@]}"} "$DIST/$STEM.pkg"
           pkgutil --check-signature "$DIST/$STEM.pkg" || true
 
       - name: Notarise and staple the pkg
