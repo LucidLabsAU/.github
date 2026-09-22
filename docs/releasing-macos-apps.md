@@ -13,7 +13,8 @@ reusable workflow in this repo,
 1. `swift test`
 2. arm64 build (`swift build -c release --arch arm64`)
 3. assemble `<App>.app`, stamping `CFBundleShortVersionString` from the tag
-   (`v1.2.3` → `1.2.3`) and `CFBundleVersion` from the run number
+   (`v1.2.3` → `1.2.3`) and `CFBundleVersion` from the run number, with any
+   app extensions (see below) in `Contents/PlugIns/`
 4. sign with hardened runtime, notarise and staple, if the Developer ID secrets
    are present; ad-hoc sign and warn if they aren't
 5. `<App>-<version>.zip`, plus `<App>-<version>.pkg` installing to
@@ -38,6 +39,28 @@ Signing turns on by itself: once the secrets below are on an app repo's
 `release` environment, the next run signs and notarises without any workflow
 change. A half-configured environment (a certificate without its password or
 API key) fails the run instead of shipping something half-signed.
+
+### App extensions (widgets)
+
+SwiftPM has no app-extension product type, so an extension such as a WidgetKit
+widget is built as an ordinary executable target, linked the way Xcode links
+extensions (`-e _NSExtensionMain`, `-application_extension`). The workflow
+wraps it into a bundle when the caller lists it in `app-extensions`, one per
+line as `<executable> <info-plist> <entitlements>`:
+
+```yaml
+    with:
+      app-extensions: |
+        SitrepWidget Support/Widget-Info.plist Support/SitrepWidget.entitlements
+```
+
+Each one becomes `Contents/PlugIns/<executable>.appex`, takes the app's
+version and build number (the system won't load an extension whose version
+differs from its host app's), and is signed with its own entitlements before
+the app is signed over it. WidgetKit only loads sandboxed extensions, so the
+entitlements need at least `com.apple.security.app-sandbox`. The Info.plist
+must name the executable and carry `NSExtension` → `NSExtensionPointIdentifier`;
+the run checks both before building.
 
 ## Secrets
 

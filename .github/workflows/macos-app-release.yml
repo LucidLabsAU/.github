@@ -40,6 +40,15 @@ on:
         required: false
         type: string
         default: Support/Info.plist
+      app-extensions:
+        description: >-
+          App extensions to embed, one per line as `<executable> <info-plist> <entitlements>`,
+          e.g. `SitrepWidget Support/Widget-Info.plist Support/SitrepWidget.entitlements`. Each
+          SwiftPM executable becomes Contents/PlugIns/<executable>.appex, takes the app's
+          version, and is signed with its own entitlements before the app is.
+        required: false
+        type: string
+        default: ''
       icon:
         description: .icns to bundle as Contents/Resources (skipped if absent)
         required: false
@@ -97,6 +106,7 @@ jobs:
       EXECUTABLE: ${{ inputs.executable }}
       BUNDLE_ID: ${{ inputs.bundle-id }}
       ENTITLEMENTS: ${{ inputs.entitlements }}
+      APP_EXTENSIONS: ${{ inputs.app-extensions }}
       INFO_PLIST: ${{ inputs.info-plist }}
       ICON: ${{ inputs.icon }}
       DRY_RUN: ${{ inputs.dry-run }}
@@ -126,6 +136,19 @@ jobs:
             || { echo "::error::CFBundleIdentifier in $INFO_PLIST is not $BUNDLE_ID"; exit 1; }
           [[ "$(plist_get CFBundleExecutable)" == "$EXECUTABLE" ]] \
             || { echo "::error::CFBundleExecutable in $INFO_PLIST is not $EXECUTABLE"; exit 1; }
+
+          while read -r ext_exe ext_plist ext_entitlements extra; do
+            [[ -z "$ext_exe" ]] && continue
+            if [[ -z "$ext_entitlements" || -n "$extra" ]]; then
+              echo "::error::app-extensions lines are '<executable> <info-plist> <entitlements>': got '$ext_exe $ext_plist $ext_entitlements $extra'"; exit 1
+            fi
+            test -f "$ext_plist" || { echo "::error::Extension Info.plist not found: $ext_plist"; exit 1; }
+            test -f "$ext_entitlements" || { echo "::error::Extension entitlements not found: $ext_entitlements"; exit 1; }
+            [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$ext_plist")" == "$ext_exe" ]] \
+              || { echo "::error::CFBundleExecutable in $ext_plist is not $ext_exe"; exit 1; }
+            /usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$ext_plist" > /dev/null \
+              || { echo "::error::$ext_plist has no NSExtension:NSExtensionPointIdentifier"; exit 1; }
+          done <<< "$APP_EXTENSIONS"
 
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             [[ "$GITHUB_REF_NAME" == v* ]] || { echo "::error::Tag $GITHUB_REF_NAME must start with v (v1.2.3)"; exit 1; }
@@ -168,11 +191,21 @@ jobs:
         run: |
           set -euo pipefail
           swift build -c release --arch arm64
-          bin=".build/arm64-apple-macosx/release/$EXECUTABLE"
-          test -x "$bin" || { echo "::error::Release binary not found at $bin"; exit 1; }
-          archs="$(lipo -archs "$bin")"
-          echo "Architectures: $archs"
-          [[ "$archs" == "arm64" ]] || { echo "::error::Expected arm64 only, got: $archs"; exit 1; }
+          # Ask SwiftPM where it put the products: the layout differs by toolchain.
+          bin_dir="$(swift build -c release --arch arm64 --show-bin-path)"
+          echo "BIN_DIR=$bin_dir" >> "$GITHUB_ENV"
+          check_binary() {
+            local bin="$bin_dir/$1" archs
+            test -x "$bin" || { echo "::error::Release binary not found at $bin"; exit 1; }
+            archs="$(lipo -archs "$bin")"
+            echo "$1 architectures: $archs"
+            [[ "$archs" == "arm64" ]] || { echo "::error::Expected arm64 only for $1, got: $archs"; exit 1; }
+          }
+          check_binary "$EXECUTABLE"
+          while read -r ext_exe _; do
+            [[ -z "$ext_exe" ]] && continue
+            check_binary "$ext_exe"
+          done <<< "$APP_EXTENSIONS"
 
       - name: Assemble and stamp the .app
         env:
@@ -183,12 +216,24 @@ jobs:
           app="$DIST/$APP_NAME.app"
           rm -rf "$DIST"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp ".build/arm64-apple-macosx/release/$EXECUTABLE" "$app/Contents/MacOS/$EXECUTABLE"
+          cp "$BIN_DIR/$EXECUTABLE" "$app/Contents/MacOS/$EXECUTABLE"
           cp "$INFO_PLIST" "$app/Contents/Info.plist"
           if [[ -f "$ICON" ]]; then cp "$ICON" "$app/Contents/Resources/"; fi
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$app/Contents/Info.plist"
           plutil -lint "$app/Contents/Info.plist"
+
+          # Extensions must carry their host app's version, or the system refuses to load them.
+          while read -r ext_exe ext_plist _; do
+            [[ -z "$ext_exe" ]] && continue
+            appex="$app/Contents/PlugIns/$ext_exe.appex"
+            mkdir -p "$appex/Contents/MacOS"
+            cp "$BIN_DIR/$ext_exe" "$appex/Contents/MacOS/$ext_exe"
+            cp "$ext_plist" "$appex/Contents/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$appex/Contents/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$appex/Contents/Info.plist"
+            plutil -lint "$appex/Contents/Info.plist"
+          done <<< "$APP_EXTENSIONS"
 
       - name: Import Developer ID certificates
         if: env.HAS_APP_CERT == 'true'
@@ -237,6 +282,11 @@ jobs:
         run: |
           set -euo pipefail
           args=(--force --options runtime --timestamp --keychain "$KEYCHAIN" --sign "$APP_IDENTITY")
+          # Inside out: each extension with its own entitlements, then the app seals them.
+          while read -r ext_exe _ ext_entitlements; do
+            [[ -z "$ext_exe" ]] && continue
+            codesign "${args[@]}" --entitlements "$ext_entitlements" "$DIST/$APP_NAME.app/Contents/PlugIns/$ext_exe.appex"
+          done <<< "$APP_EXTENSIONS"
           if [[ -n "$ENTITLEMENTS" ]]; then args+=(--entitlements "$ENTITLEMENTS"); fi
           codesign "${args[@]}" "$DIST/$APP_NAME.app"
 
@@ -245,6 +295,10 @@ jobs:
         run: |
           set -euo pipefail
           args=(--force --options runtime --sign -)
+          while read -r ext_exe _ ext_entitlements; do
+            [[ -z "$ext_exe" ]] && continue
+            codesign "${args[@]}" --entitlements "$ext_entitlements" "$DIST/$APP_NAME.app/Contents/PlugIns/$ext_exe.appex"
+          done <<< "$APP_EXTENSIONS"
           if [[ -n "$ENTITLEMENTS" ]]; then args+=(--entitlements "$ENTITLEMENTS"); fi
           codesign "${args[@]}" "$DIST/$APP_NAME.app"
           echo "::warning title=Unsigned build::$APP_NAME is ad-hoc signed and not notarised (no DEVELOPER_ID_APP_P12_BASE64). Gatekeeper will block it on other Macs and Intune will not accept the .pkg."
@@ -252,7 +306,7 @@ jobs:
       - name: Verify signature
         run: |
           set -euo pipefail
-          codesign --verify --strict --verbose=2 "$DIST/$APP_NAME.app"
+          codesign --verify --strict --deep --verbose=2 "$DIST/$APP_NAME.app"
           codesign -dvv "$DIST/$APP_NAME.app" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp|Runtime Version|CodeDirectory)'
 
       - name: Notarise and staple the .app
