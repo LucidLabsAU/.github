@@ -264,5 +264,5 @@ guarantee and gives up managed uninstall.
 ## Beyond these apps
 
 The same Developer ID Application and Developer ID Installer certificates, in
-team N3DE89M9C7, also unblock signing and notarising the CHARLi HL7 bridge
+team N3DE89M9C7, also unblock signing and notarising the CHARLI HL7 bridge
 installer. It's waiting on this same pair.
