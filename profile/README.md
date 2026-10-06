@@ -81,4 +81,4 @@ Resist the temptation to fork-and-modify outside these patterns.
 
 ---
 
-_This map replaces the pre-consolidation layout. Repos retired during consolidation: `lucidazure-runbooks` (absorbed into `lucidazure`), `partnerBuilder` (reference docs salvaged to `.github/docs/partner-program/`), `lucy` (paused), `pfa-training-pitch` (pptx logic moved to `productivity-mcp`), `powerbi-report-toolkit` (stale clone of `fabric-tools`)._
+_This map replaces the pre-consolidation layout. Repos retired during consolidation: `lucidazure-runbooks` (absorbed into `lucidazure`), `partnerBuilder`, `lucy` (paused), `pfa-training-pitch` (pptx logic moved to `productivity-mcp`), `powerbi-report-toolkit` (stale clone of `fabric-tools`)._
